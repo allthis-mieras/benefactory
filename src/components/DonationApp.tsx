@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
 	Bar,
 	BarChart,
@@ -50,45 +50,26 @@ type Donation = {
 
 type Message = { type: 'success' | 'error' | 'info'; text: string } | null;
 
-type StoredState = {
-	annualIncome: number;
+type HouseholdPayload = {
+	household: {
+		id: string;
+		annual_income: number;
+		alias: string | null;
+	};
 	donations: Donation[];
 };
 
-const STORAGE_KEY = 'benefactory.dashboard';
+const COOKIE_KEY = 'mindthegap_household';
 const SHARE_PARAM = 'd';
+const LINE_COLORS = ['#ee352e', '#fccc0a', '#00933c', '#ff6319', '#0039a6'];
 
-const BILLIONAIRES = [
-	{
-		name: 'Jij',
-		netWorth: 0,
-		source: 'Eigen donaties',
-	},
-	{
-		name: 'Elon Musk',
-		netWorth: 226_000_000_000,
-		source: 'Forbes Real-Time Billionaires (2024-10)',
-	},
-	{
-		name: 'Jeff Bezos',
-		netWorth: 205_000_000_000,
-		source: 'Forbes Real-Time Billionaires (2024-10)',
-	},
-	{
-		name: 'Bernard Arnault',
-		netWorth: 195_000_000_000,
-		source: 'Forbes Real-Time Billionaires (2024-10)',
-	},
-];
-
-const BAR_COLORS = ['var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)'];
-const PIE_COLORS = [
-	'var(--chart-1)',
-	'var(--chart-2)',
-	'var(--chart-3)',
-	'var(--chart-4)',
-	'var(--chart-5)',
-];
+const BAR_COLORS = LINE_COLORS;
+const PIE_COLORS = ['#ee352e', '#00933c', '#ff6319', '#b933ad', '#0039a6'];
+const MESSAGE_STYLES: Record<'success' | 'error' | 'info', string> = {
+  success: 'border border-emerald-600 bg-emerald-50 text-emerald-900',
+  error: 'border border-red-600 bg-red-50 text-red-900',
+  info: 'border border-sky-600 bg-sky-50 text-sky-900',
+};
 
 const numberFormatter = new Intl.NumberFormat('nl-NL');
 const currencyFormatter = new Intl.NumberFormat('nl-NL', {
@@ -98,19 +79,30 @@ const currencyFormatter = new Intl.NumberFormat('nl-NL', {
 });
 const percentFormatter = new Intl.NumberFormat('nl-NL', { style: 'percent', maximumFractionDigits: 1 });
 
-const sanitizeNumericInput = (value: string) => value.replace(/[^\d]/g, '');
+const BILLIONAIRES = [
+  {
+    name: 'Elon Musk',
+    netWorth: 226_000_000_000,
+  },
+  {
+    name: 'Jeff Bezos',
+    netWorth: 205_000_000_000,
+  },
+  {
+    name: 'Bernard Arnault',
+    netWorth: 195_000_000_000,
+  },
+];
 
+const sanitizeNumericInput = (value: string) => value.replace(/[^\d]/g, '');
 const formatNumericInput = (value: string) => {
 	const digits = sanitizeNumericInput(value);
 	if (!digits) return '';
-	const asNumber = Number(digits);
-	return numberFormatter.format(asNumber);
+	return numberFormatter.format(Number(digits));
 };
-
 const parseNumericInput = (value: string) => {
 	const digits = sanitizeNumericInput(value);
-	if (!digits) return 0;
-	return Number(digits);
+	return digits ? Number(digits) : 0;
 };
 
 const computeAnnualAmount = (amount: number, frequency: DonationFrequency) => {
@@ -124,79 +116,120 @@ const computeAnnualAmount = (amount: number, frequency: DonationFrequency) => {
 	}
 };
 
-const encodeState = (state: StoredState) =>
-	btoa(encodeURIComponent(JSON.stringify(state)));
+const readCookie = (name: string) => {
+	if (typeof document === 'undefined') return null;
+	const match = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
+	return match ? decodeURIComponent(match[1]) : null;
+};
 
-const decodeState = (encoded: string): StoredState | null => {
-	try {
-		return JSON.parse(decodeURIComponent(atob(encoded))) as StoredState;
-	} catch {
-		return null;
-	}
+const writeCookie = (name: string, value: string, days = 30) => {
+	if (typeof document === 'undefined') return;
+	const expires = new Date(Date.now() + days * 864e5).toUTCString();
+	document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
 };
 
 export default function DonationApp() {
+	const [householdId, setHouseholdId] = useState<string | null>(null);
 	const [annualIncome, setAnnualIncome] = useState<number>(0);
-	const [donations, setDonations] = useState<Donation[]>([]);
 	const [incomeInput, setIncomeInput] = useState<string>('');
-	const [formState, setFormState] = useState({
-		charity: '',
-		amount: '',
-		frequency: 'monthly' as DonationFrequency,
-	});
+	const [donations, setDonations] = useState<Donation[]>([]);
 	const [chartView, setChartView] = useState<'income' | 'donations'>('income');
 	const [isSheetOpen, setIsSheetOpen] = useState(false);
 	const [shareLink, setShareLink] = useState<string | null>(null);
 	const [message, setMessage] = useState<Message>(null);
 	const [loading, setLoading] = useState(true);
+	const [editingDonation, setEditingDonation] = useState<Donation | null>(null);
+	const defaultDonationForm = { charity: '', amount: '', frequency: 'monthly' as DonationFrequency };
+	const [formState, setFormState] = useState(defaultDonationForm);
+	const isEditing = Boolean(editingDonation);
+	const sheetTitle = isEditing ? 'Edit charity' : 'Add charity';
+	const submitLabel = isEditing ? 'Update' : 'Save';
 
-	useEffect(() => {
-		const url = new URL(window.location.href);
-		const shared = url.searchParams.get(SHARE_PARAM);
+	const resetForm = () => {
+		setFormState({ ...defaultDonationForm });
+		setEditingDonation(null);
+	};
 
-		if (shared) {
-			const decoded = decodeState(shared);
-			if (decoded) {
-				setAnnualIncome(decoded.annualIncome ?? 0);
-				setIncomeInput(decoded.annualIncome ? numberFormatter.format(decoded.annualIncome) : '');
-				setDonations(decoded.donations ?? []);
-			} else {
-				console.warn('Kon gedeelde link niet lezen.');
-			}
+	const openNewDonation = () => {
+		resetForm();
+		setIsSheetOpen(true);
+	};
 
-			url.searchParams.delete(SHARE_PARAM);
-			window.history.replaceState(null, '', url.toString());
-			setLoading(false);
-			return;
+	const openEditDonation = (donation: Donation) => {
+		setEditingDonation(donation);
+		setFormState({
+			charity: donation.charity_name,
+			amount: numberFormatter.format(donation.amount),
+			frequency: donation.frequency,
+		});
+		setIsSheetOpen(true);
+	};
+
+	const applyPayload = useCallback((payload: HouseholdPayload) => {
+		if (payload.household) {
+			setHouseholdId(payload.household.id);
+			setAnnualIncome(payload.household.annual_income ?? 0);
+			setIncomeInput(
+				payload.household.annual_income ? numberFormatter.format(payload.household.annual_income) : '',
+			);
 		}
-
-		try {
-			const raw = globalThis.localStorage?.getItem(STORAGE_KEY);
-			if (raw) {
-				const parsed = JSON.parse(raw) as StoredState;
-				setAnnualIncome(parsed.annualIncome ?? 0);
-				setIncomeInput(parsed.annualIncome ? numberFormatter.format(parsed.annualIncome) : '');
-				setDonations(parsed.donations ?? []);
-			}
-		} catch (error) {
-			console.error('Kon opgeslagen gegevens niet lezen', error);
-		} finally {
-			setLoading(false);
-		}
+		setDonations(payload.donations ?? []);
 	}, []);
 
 	useEffect(() => {
-		if (loading) return;
-		const snapshot: StoredState = {
-			annualIncome,
-			donations,
+		const initialise = async () => {
+			try {
+				const currentUrl = new URL(window.location.href);
+				const sharedId = currentUrl.searchParams.get(SHARE_PARAM);
+
+				if (sharedId) {
+					const response = await fetch(`/api/household?id=${sharedId}`);
+					if (response.ok) {
+						const payload = (await response.json()) as HouseholdPayload;
+						applyPayload(payload);
+						writeCookie(COOKIE_KEY, payload.household.id);
+					} else {
+						setMessage({ type: 'error', text: 'Could not load that shared snapshot.' });
+					}
+					currentUrl.searchParams.delete(SHARE_PARAM);
+					window.history.replaceState(null, '', currentUrl.toString());
+					setLoading(false);
+					return;
+				}
+
+				const cookieId = readCookie(COOKIE_KEY);
+				if (cookieId) {
+					const response = await fetch(`/api/household?id=${cookieId}`);
+					if (response.ok) {
+						const payload = (await response.json()) as HouseholdPayload;
+						applyPayload(payload);
+						setLoading(false);
+						return;
+					}
+				}
+
+				const response = await fetch('/api/household', {
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({ annualIncome: 0 }),
+				});
+				if (response.ok) {
+					const payload = (await response.json()) as HouseholdPayload;
+					applyPayload(payload);
+					writeCookie(COOKIE_KEY, payload.household.id);
+				} else {
+					setMessage({ type: 'error', text: 'Starting a fresh session failed. Try again shortly.' });
+				}
+			} catch (error) {
+				console.error(error);
+				setMessage({ type: 'error', text: 'Something went sideways while talking to the server.' });
+			} finally {
+				setLoading(false);
+			}
 		};
-		try {
-			globalThis.localStorage?.setItem(STORAGE_KEY, JSON.stringify(snapshot));
-		} catch (error) {
-			console.error('Kon gegevens niet opslaan', error);
-		}
-	}, [annualIncome, donations, loading]);
+
+		initialise();
+	}, [applyPayload]);
 
 	useEffect(() => {
 		if (!message) return;
@@ -219,31 +252,23 @@ export default function DonationApp() {
 	}, [donations, totals.totalAnnualDonations]);
 
 	const comparisonData = useMemo(() => {
-		const personalEntry = totals.totalAnnualDonations
-			? [{ name: 'Jij', contribution: totals.totalAnnualDonations, color: BAR_COLORS[0], source: 'Eigen donaties' }]
-			: [];
-
 		if (totals.percentage <= 0) {
-			return personalEntry.length ? personalEntry : [];
+			return [];
 		}
 
-		const percentage = totals.percentage;
-		const billionaireEntries = BILLIONAIRES.slice(1).map((person, index) => ({
+		return BILLIONAIRES.map((person, index) => ({
 			name: person.name,
-			contribution: (person.netWorth * percentage) / 100,
-			source: person.source,
-			color: BAR_COLORS[(index + 1) % BAR_COLORS.length],
+			contribution: (person.netWorth * totals.percentage) / 100,
+			color: BAR_COLORS[index % BAR_COLORS.length],
 		}));
-
-		return [...personalEntry, ...billionaireEntries];
 	}, [totals]);
 
 	const incomePieData = useMemo(() => {
 		const donated = totals.totalAnnualDonations;
 		const remaining = Math.max(annualIncome - donated, 0);
 		return [
-			{ name: 'Donaties', value: donated, color: PIE_COLORS[0] },
-			{ name: 'Overig inkomen', value: remaining, color: PIE_COLORS[1] },
+			{ name: 'Donations', value: donated, color: PIE_COLORS[0] },
+			{ name: 'Remaining income', value: remaining, color: PIE_COLORS[1] },
 		];
 	}, [annualIncome, totals.totalAnnualDonations]);
 
@@ -256,12 +281,146 @@ export default function DonationApp() {
 		}));
 	}, [donationsWithShare]);
 
+	const metrics = useMemo(() => {
+		const percentageDisplay = totals.percentage ? `${totals.percentage.toFixed(1)}%` : '0%';
+		return [
+			{ label: 'Annual income', value: currencyFormatter.format(annualIncome || 0) },
+			{ label: 'Yearly donations', value: currencyFormatter.format(totals.totalAnnualDonations || 0) },
+			{ label: 'Share of income', value: percentageDisplay },
+		];
+	}, [annualIncome, totals.totalAnnualDonations, totals.percentage]);
+
+	const handleIncomeSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+		event.preventDefault();
+		if (!householdId) return;
+
+		const parsed = parseNumericInput(incomeInput);
+		setAnnualIncome(parsed);
+		setIncomeInput(parsed ? numberFormatter.format(parsed) : '');
+
+		const response = await fetch('/api/household', {
+			method: 'PUT',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ id: householdId, annualIncome: parsed }),
+		});
+		if (!response.ok) {
+			setMessage({ type: 'error', text: 'Updating your income fizzled.' });
+			return;
+		}
+		const payload = (await response.json()) as HouseholdPayload;
+		applyPayload(payload);
+		setMessage({ type: 'success', text: 'Income saved.' });
+	};
+
+	const handleDonationSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+		event.preventDefault();
+		if (!householdId) return;
+
+		const amount = parseNumericInput(formState.amount);
+		if (!formState.charity.trim() || amount <= 0) {
+			setMessage({ type: 'error', text: 'Add a charity name and a positive amount.' });
+			return;
+		}
+
+		const payload = {
+			charityName: formState.charity.trim(),
+			amount,
+			frequency: formState.frequency,
+		};
+
+		if (editingDonation) {
+			const response = await fetch('/api/donations', {
+				method: 'PUT',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					id: editingDonation.id,
+					householdId,
+					...payload,
+				}),
+			});
+
+			if (!response.ok) {
+				setMessage({ type: 'error', text: 'Could not update that donation.' });
+				return;
+			}
+
+			const { donations: fresh } = (await response.json()) as { donations: Donation[] };
+			setDonations(fresh ?? []);
+			setMessage({ type: 'success', text: 'Donation updated.' });
+		} else {
+			const response = await fetch('/api/donations', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ householdId, ...payload }),
+			});
+
+			if (!response.ok) {
+				setMessage({ type: 'error', text: 'Could not store that donation.' });
+				return;
+			}
+
+			const { donations: fresh } = (await response.json()) as { donations: Donation[] };
+			setDonations(fresh ?? []);
+			setMessage({ type: 'success', text: 'Donation added.' });
+		}
+
+		resetForm();
+		setIsSheetOpen(false);
+	};
+
+	const handleRemoveDonation = async (id: string) => {
+		if (!householdId) return;
+
+		const response = await fetch('/api/donations', {
+			method: 'DELETE',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ id, householdId }),
+		});
+
+		if (!response.ok) {
+			setMessage({ type: 'error', text: 'Could not remove that donation.' });
+			return;
+		}
+
+		setDonations((current) => current.filter((donation) => donation.id !== id));
+		setMessage({ type: 'info', text: 'Donation removed.' });
+	};
+
+	const handleShare = () => {
+		if (!householdId) {
+			setMessage({ type: 'error', text: 'Add your own numbers before sharing them.' });
+		 return;
+		}
+		const url = new URL(window.location.href);
+		url.searchParams.set(SHARE_PARAM, householdId);
+		const link = url.toString();
+		setShareLink(link);
+		if (navigator.clipboard?.writeText) {
+			navigator.clipboard.writeText(link).catch(() => {
+				/* noop */
+			});
+		}
+		setMessage({ type: 'success', text: 'Shareable link copied to your clipboard.' });
+	};
+
+	const twitterShareUrl = useMemo(() => {
+		if (!householdId) return '#';
+		const url = new URL(window.location.href);
+		url.searchParams.set(SHARE_PARAM, householdId);
+		const text = encodeURIComponent(
+			`Hey @JeffBezos, I give ${percentFormatter.format(totals.percentage / 100)} of my income to charity. That would be ${currencyFormatter.format(
+				((BILLIONAIRES[1]?.netWorth ?? 0) * totals.percentage) / 1200,
+			)} a month for you. #MindTheGap`,
+		);
+		return `https://twitter.com/intent/tweet?text=${text}&url=${encodeURIComponent(url.toString())}`;
+	}, [householdId, totals.percentage]);
+
 	if (loading) {
 		return (
 			<Card className="border-dashed">
 				<CardHeader>
-					<CardTitle>Donatieoverzicht wordt geladen</CardTitle>
-					<CardDescription>Even geduld, we bereiden je dashboard voor…</CardDescription>
+					<CardTitle>Loading your dashboard</CardTitle>
+					<CardDescription>Hold tight — we’re lining up the numbers.</CardDescription>
 				</CardHeader>
 				<CardContent className="grid gap-4">
 					<Skeleton className="h-12 w-full rounded-lg" />
@@ -271,365 +430,389 @@ export default function DonationApp() {
 		);
 	}
 
-	const handleIncomeSubmit = (event: React.FormEvent<HTMLFormElement>) => {
-		event.preventDefault();
-		const parsed = parseNumericInput(incomeInput);
-		setAnnualIncome(parsed);
-		setIncomeInput(parsed ? numberFormatter.format(parsed) : '');
-		setMessage({ type: 'success', text: 'Jaarinkomen opgeslagen.' });
-	};
-
-	const handleDonationSubmit = (event: React.FormEvent<HTMLFormElement>) => {
-		event.preventDefault();
-
-		const amount = parseNumericInput(formState.amount);
-		if (!formState.charity.trim() || amount <= 0) {
-			setMessage({ type: 'error', text: 'Vul een geldige naam en bedrag in.' });
-			return;
-		}
-
-		const donation: Donation = {
-			id: globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2),
-			charity_name: formState.charity.trim(),
-			amount,
-			frequency: formState.frequency,
-			annual_amount: computeAnnualAmount(amount, formState.frequency),
-			created_at: new Date().toISOString(),
-		};
-
-		setDonations((current) => [...current, donation]);
-		setFormState((prev) => ({ ...prev, charity: '', amount: '' }));
-		setIsSheetOpen(false);
-		setMessage({ type: 'success', text: 'Donatie toegevoegd.' });
-	};
-
-	const handleRemoveDonation = (id: string) => {
-		setDonations((current) => current.filter((donation) => donation.id !== id));
-		setMessage({ type: 'info', text: 'Donatie verwijderd.' });
-	};
-
-	const handleShare = () => {
-		if (!annualIncome && donations.length === 0) {
-			setMessage({ type: 'error', text: 'Voeg eerst gegevens toe voordat je een link deelt.' });
-			return;
-		}
-
-		try {
-			const payload: StoredState = { annualIncome, donations };
-			const encoded = encodeState(payload);
-			const url = new URL(window.location.href);
-			url.searchParams.set(SHARE_PARAM, encoded);
-			const link = url.toString();
-			setShareLink(link);
-			if (navigator.clipboard?.writeText) {
-				navigator.clipboard.writeText(link).catch(() => {
-					// fall back silently
-				});
-			}
-			setMessage({ type: 'success', text: 'Deelbare link gekopieerd naar je klembord.' });
-		} catch (error) {
-			console.error('Kon link niet genereren', error);
-			setMessage({ type: 'error', text: 'Kon geen deelbare link genereren.' });
-		}
-	};
-
 	return (
-		<Sheet open={isSheetOpen} onOpenChange={setIsSheetOpen}>
+		<Sheet
+			open={isSheetOpen}
+			onOpenChange={(open) => {
+				setIsSheetOpen(open);
+				if (!open) {
+					resetForm();
+				}
+			}}
+		>
 			<div className="flex flex-col gap-10">
 				{message ? (
 					<div
 						className={cn(
-							'rounded-lg border px-4 py-3 text-sm transition-colors',
-							message.type === 'success' && 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-200',
-							message.type === 'error' && 'border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-200',
-							message.type === 'info' && 'border-sky-500/30 bg-sky-500/10 text-sky-600 dark:text-sky-200',
+							'px-4 py-3 text-xs font-semibold uppercase tracking-[0.28em]',
+							MESSAGE_STYLES[message.type],
 						)}
 					>
 						{message.text}
 					</div>
 				) : null}
-
-				<div className="grid gap-6 lg:grid-cols-2">
-					<Card>
-						<CardHeader>
-							<CardTitle>Jaarinkomen</CardTitle>
-							<CardDescription>
-								Vul je bruto jaarinkomen in. We berekenen automatisch hoeveel procent van je inkomen je weggeeft.
-							</CardDescription>
-						</CardHeader>
-						<CardContent>
-							<form className="flex flex-col gap-4" onSubmit={handleIncomeSubmit}>
-								<div className="grid gap-2">
-									<Label htmlFor="income">Jaarinkomen (EUR)</Label>
-									<Input
-										id="income"
-										inputMode="numeric"
-										pattern="[0-9.]*"
-										value={incomeInput}
-										onChange={(event) => setIncomeInput(formatNumericInput(event.target.value))}
-										placeholder="Bijv. 42.000"
-									/>
-								</div>
-								<Button type="submit" className="w-fit">
-									Bedrag opslaan
-								</Button>
-							</form>
-						</CardContent>
-					</Card>
-
-					<Card>
-						<CardHeader>
-							<CardTitle>Deel je dashboard</CardTitle>
-							<CardDescription>
-								Maak een unieke link om deze berekening later te heropenen of te delen met je partner of team.
-							</CardDescription>
-						</CardHeader>
-						<CardContent className="flex flex-col gap-3">
-							<Button variant="outline" onClick={handleShare} className="w-fit">
-								Deelbare link kopiëren
-							</Button>
-							{shareLink ? (
-								<div className="rounded-lg border border-border/60 bg-background/60 p-3 text-xs text-muted-foreground">
-									<p className="font-medium text-foreground">Gegenereerde link</p>
-									<p className="truncate font-mono text-xs">{shareLink}</p>
-								</div>
-							) : null}
-							<div className="flex flex-wrap gap-3">
-								<Badge variant="outline">
-									Totaal giften: {currencyFormatter.format(totals.totalAnnualDonations)}
-								</Badge>
-								<Badge variant="outline">% inkomen: {percentFormatter.format(totals.percentage / 100)}</Badge>
+				<section className="grid gap-px border border-foreground/60 bg-muted md:grid-cols-12">
+					<div className="bg-card p-6 md:col-span-5">
+						<Badge variant="outline" className="tracking-[0.3em] uppercase text-muted-foreground">
+							Step 1
+						</Badge>
+						<h2 className="mt-4 text-3xl font-black uppercase tracking-tight text-foreground">Annual income</h2>
+						<p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+							Enter your yearly income. Every percentage and comparison reacts in real time.
+						</p>
+						<form className="mt-6 flex flex-col gap-4" onSubmit={handleIncomeSubmit}>
+							<div className="grid gap-2">
+								<Label htmlFor="income">Annual income (EUR)</Label>
+								<Input
+									id="income"
+									inputMode="numeric"
+									pattern="[0-9.]*"
+									value={incomeInput}
+									onChange={(event) => setIncomeInput(formatNumericInput(event.target.value))}
+									placeholder="e.g. 42.000"
+								/>
 							</div>
-						</CardContent>
-					</Card>
-				</div>
-
-				<Card>
-					<CardHeader className="gap-4 md:flex md:flex-row md:items-center md:justify-between">
-						<div>
-							<CardTitle>Donatieoverzicht</CardTitle>
-							<CardDescription>Houd je goede doelen bij en zie direct hun aandeel.</CardDescription>
+							<Button type="submit" className="w-fit tracking-[0.22em] uppercase">
+								Save income
+							</Button>
+						</form>
+					</div>
+					<div className="bg-card p-6 md:col-span-7 md:border-l md:border-foreground/60">
+						<Badge variant="outline" className="tracking-[0.3em] uppercase text-muted-foreground">
+							Overview
+						</Badge>
+						<div className="mt-5 grid gap-px border border-foreground/60 bg-muted sm:grid-cols-3">
+							{metrics.map((metric, index) => (
+								<div key={metric.label} className="bg-card p-5">
+									<div className="flex items-center gap-4">
+										<span
+											className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold text-white"
+											style={{ backgroundColor: LINE_COLORS[index % LINE_COLORS.length] }}
+										>
+											{index + 1}
+										</span>
+										<div className="space-y-1">
+											<p className="text-xs uppercase tracking-[0.25em] text-muted-foreground">
+												{metric.label}
+											</p>
+											<p className="text-2xl font-black tracking-tight text-foreground">{metric.value}</p>
+										</div>
+									</div>
+								</div>
+							))}
 						</div>
-						<SheetTrigger asChild>
-							<Button>Goed doel toevoegen</Button>
-						</SheetTrigger>
-					</CardHeader>
-					<CardContent className="space-y-6">
-						<div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-							<Badge variant="outline" className="flex flex-col items-start gap-1 px-3 py-2">
-								<span className="text-xs uppercase text-muted-foreground">Jaarinkomen</span>
-								<span className="text-base font-semibold text-foreground">
-									{currencyFormatter.format(annualIncome)}
-								</span>
-							</Badge>
-							<Badge variant="outline" className="flex flex-col items-start gap-1 px-3 py-2">
-								<span className="text-xs uppercase text-muted-foreground">Jaarlijkse giften</span>
-								<span className="text-base font-semibold text-foreground">
-									{currencyFormatter.format(totals.totalAnnualDonations)}
-								</span>
-							</Badge>
-							<Badge variant="outline" className="flex flex-col items-start gap-1 px-3 py-2">
-								<span className="text-xs uppercase text-muted-foreground">% van inkomen</span>
-								<span className="text-base font-semibold text-foreground">
-									{percentFormatter.format(totals.percentage / 100)}
-								</span>
-							</Badge>
-						</div>
+					</div>
+				</section>
 
-						<div className="rounded-lg border bg-card/70">
-							<Table>
-								<TableHeader>
-									<TableRow>
-										<TableHead>Goed doel</TableHead>
-										<TableHead>Frequentie</TableHead>
-										<TableHead className="text-right">Per periode</TableHead>
-										<TableHead className="text-right">Per jaar</TableHead>
-										<TableHead className="text-right">% van donaties</TableHead>
-										<TableHead className="text-right">Actie</TableHead>
-									</TableRow>
-								</TableHeader>
-								<TableBody>
-									{donationsWithShare.length === 0 ? (
-										<TableRow>
-											<TableCell colSpan={6} className="py-6 text-center text-muted-foreground">
-												Geen donaties toegevoegd. Klik op “Goed doel toevoegen” om te beginnen.
-											</TableCell>
-										</TableRow>
+				<section className="border border-foreground/60">
+					<header className="flex flex-col gap-4 border-b border-foreground/60 bg-secondary px-6 py-6 lg:flex-row lg:items-center lg:justify-between">
+						<div className="space-y-2">
+							<Badge variant="outline" className="tracking-[0.3em] uppercase text-muted-foreground">
+								Step 2
+							</Badge>
+							<h2 className="text-3xl font-black uppercase tracking-tight text-foreground">Your charities</h2>
+							<p className="max-w-xl text-sm leading-relaxed text-muted-foreground">
+								Add every charity you support. Tweak the cards whenever the amount or cadence shifts.
+							</p>
+						</div>
+						<Button onClick={openNewDonation} className="tracking-[0.25em] uppercase">
+							Add charity
+						</Button>
+					</header>
+					{donationsWithShare.length === 0 ? (
+						<div className="px-6 py-12 text-sm text-muted-foreground">
+							No donations yet. Start with your first charity to unlock the dashboard.
+						</div>
+					) : (
+						<div className="grid gap-px border-t border-foreground/60 bg-muted">
+							{donationsWithShare.map((donation, index) => (
+								<div key={donation.id} className="bg-card p-6">
+									<div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+										<div className="flex items-center gap-4">
+											<span
+												className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold text-white"
+												style={{ backgroundColor: LINE_COLORS[index % LINE_COLORS.length] }}
+											>
+												{index + 1}
+											</span>
+											<div>
+												<h3 className="text-xl font-semibold text-foreground">{donation.charity_name}</h3>
+												<p className="text-xs uppercase tracking-[0.25em] text-muted-foreground">
+													{donation.frequency === 'monthly'
+														? 'Monthly'
+														: donation.frequency === 'quarterly'
+															? 'Quarterly'
+															: 'Yearly'}
+												</p>
+											</div>
+										</div>
+										<div className="flex gap-4 text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+											<button
+												className="text-primary transition-colors hover:text-primary/80"
+												onClick={() => openEditDonation(donation)}
+											>
+												Edit
+											</button>
+											<button
+												className="text-destructive transition-colors hover:text-destructive/80"
+												onClick={() => handleRemoveDonation(donation.id)}
+											>
+												Remove
+											</button>
+										</div>
+									</div>
+									<div className="mt-6 grid gap-4 text-sm uppercase tracking-[0.2em] text-muted-foreground sm:grid-cols-3">
+										<div className="space-y-1">
+											<p className="text-xs">Per period</p>
+											<p className="text-xl font-semibold text-foreground">
+												{currencyFormatter.format(donation.amount)}
+											</p>
+										</div>
+										<div className="space-y-1">
+											<p className="text-xs">Per year</p>
+											<p className="text-xl font-semibold text-foreground">
+												{currencyFormatter.format(donation.annual_amount)}
+											</p>
+										</div>
+										<div className="space-y-1">
+											<p className="text-xs">Share of giving</p>
+											<p className="text-xl font-semibold text-foreground">
+												{percentFormatter.format((donation.share || 0) / 100)}
+											</p>
+										</div>
+									</div>
+									<div className="mt-4 h-2 bg-muted">
+										<div
+											className="h-full"
+											style={{
+												width: `${Math.min(donation.share || 0, 100)}%`,
+												backgroundColor: LINE_COLORS[index % LINE_COLORS.length],
+											}}
+										/>
+									</div>
+								</div>
+							))}
+						</div>
+					)}
+				</section>
+
+				<section className="grid gap-6 lg:grid-cols-2">
+					<div className="border border-foreground/60">
+						<div className="border-b border-foreground/60 bg-secondary px-6 py-6">
+							<Badge variant="outline" className="tracking-[0.3em] uppercase text-muted-foreground">
+								Visuals
+							</Badge>
+							<h2 className="mt-2 text-3xl font-black uppercase tracking-tight text-foreground">Chart view</h2>
+							<p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+								Toggle between your income picture and how your charities stack up.
+							</p>
+						</div>
+						<div className="px-6 pb-8 pt-6">
+							<Tabs value={chartView} onValueChange={(value) => setChartView(value as typeof chartView)}>
+								<TabsList className="grid grid-cols-2 rounded-none border border-foreground/60 bg-card">
+									<TabsTrigger value="income" className="text-xs uppercase tracking-[0.22em]">
+										Income vs donations
+									</TabsTrigger>
+									<TabsTrigger value="donations" className="text-xs uppercase tracking-[0.22em]">
+										Charity split
+									</TabsTrigger>
+								</TabsList>
+								<TabsContent value="income" className="mt-6">
+									{annualIncome === 0 ? (
+										<p className="text-sm text-muted-foreground">
+											Add your income to see this view.
+										</p>
 									) : (
-										donationsWithShare.map((donation) => (
-											<TableRow key={donation.id}>
-												<TableCell className="font-medium">{donation.charity_name}</TableCell>
-												<TableCell className="capitalize">{donation.frequency}</TableCell>
-												<TableCell className="text-right">
-													{currencyFormatter.format(donation.amount)}
-												</TableCell>
-												<TableCell className="text-right">
-													{currencyFormatter.format(donation.annual_amount)}
-												</TableCell>
-												<TableCell className="text-right">
-													{percentFormatter.format((donation.share || 0) / 100)}
-												</TableCell>
-												<TableCell className="text-right">
-													<button
-														type="button"
-														onClick={() => handleRemoveDonation(donation.id)}
-														className="text-xs font-medium text-rose-500 hover:text-rose-400"
-													>
-														Verwijder
-													</button>
-												</TableCell>
-											</TableRow>
-										))
+										<div className="h-72 w-full">
+											<ResponsiveContainer>
+												<PieChart>
+													<Pie data={incomePieData} dataKey="value" innerRadius={60} outerRadius={110}>
+														{incomePieData.map((entry) => (
+															<Cell key={entry.name} fill={entry.color} />
+														))}
+													</Pie>
+													<RechartsTooltip
+														formatter={(value: number, name: string) => [
+															currencyFormatter.format(value as number),
+															name,
+														]}
+													/>
+												</PieChart>
+											</ResponsiveContainer>
+										</div>
 									)}
-								</TableBody>
-							</Table>
+								</TabsContent>
+								<TabsContent value="donations" className="mt-6">
+									{donationsWithShare.length === 0 ? (
+										<p className="text-sm text-muted-foreground">
+											Add at least one donation to unlock this chart.
+										</p>
+									) : (
+										<div className="h-72 w-full">
+											<ResponsiveContainer>
+												<PieChart>
+													<Pie data={donationPieData} dataKey="value" innerRadius={50} outerRadius={110}>
+														{donationPieData.map((entry) => (
+															<Cell key={entry.name} fill={entry.color} />
+														))}
+													</Pie>
+													<RechartsTooltip
+														formatter={(value: number, name: string, entry) => [
+															`${currencyFormatter.format(value as number)} (${percentFormatter.format((entry?.payload?.percentage || 0) / 100)})`,
+															name,
+														]}
+													/>
+												</PieChart>
+											</ResponsiveContainer>
+										</div>
+									)}
+								</TabsContent>
+							</Tabs>
 						</div>
-					</CardContent>
-				</Card>
+					</div>
 
-				<Card>
-					<CardHeader>
-						<CardTitle>Visualisaties</CardTitle>
-						<CardDescription>Kijk naar je donaties ten opzichte van je inkomen of per goed doel.</CardDescription>
-					</CardHeader>
-					<CardContent className="space-y-6">
-						<Tabs value={chartView} onValueChange={(value) => setChartView(value as typeof chartView)}>
-							<TabsList>
-								<TabsTrigger value="income">Inkomen vs donaties</TabsTrigger>
-								<TabsTrigger value="donations">Verdeling goede doelen</TabsTrigger>
-							</TabsList>
-							<TabsContent value="income" className="pt-4">
-								{annualIncome === 0 ? (
-									<p className="text-sm text-muted-foreground">
-										Voer je jaarinkomen in om dit overzicht te bekijken.
-									</p>
-								) : (
-									<div className="h-72 w-full">
+					<div className="border border-foreground/60">
+						<div className="border-b border-foreground/60 bg-secondary px-6 py-6">
+							<Badge variant="outline" className="tracking-[0.3em] uppercase text-muted-foreground">
+								Comparison
+							</Badge>
+							<h2 className="mt-2 text-3xl font-black uppercase tracking-tight text-foreground">Billionaire scenario</h2>
+							<p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+								What would your percentage mean if the richest names kept pace?
+							</p>
+						</div>
+						<div className="space-y-6 px-6 pb-8 pt-6">
+							{comparisonData.length === 0 ? (
+								<div className="flex h-24 items-center justify-center text-sm text-muted-foreground">
+									Add your income and donations to see the scale jump.
+								</div>
+							) : (
+								<>
+									<div className="overflow-x-auto">
+										<Table>
+											<TableHeader>
+												<TableRow>
+													<TableHead>Name</TableHead>
+													<TableHead className="text-right">Per year</TableHead>
+													<TableHead className="text-right">Per month</TableHead>
+												</TableRow>
+											</TableHeader>
+											<TableBody>
+												{comparisonData.map((entry, index) => (
+													<TableRow key={`${entry.name}-${index}`}>
+														<TableCell className="font-medium">{entry.name}</TableCell>
+														<TableCell className="text-right">
+															{currencyFormatter.format(entry.contribution)}
+														</TableCell>
+														<TableCell className="text-right">
+															{currencyFormatter.format(entry.contribution / 12)}
+														</TableCell>
+													</TableRow>
+												))}
+											</TableBody>
+										</Table>
+									</div>
+									<div className="h-[320px] w-full">
 										<ResponsiveContainer>
-											<PieChart>
-												<Pie data={incomePieData} dataKey="value" innerRadius={60} outerRadius={110}>
-													{incomePieData.map((entry, index) => (
-														<Cell key={entry.name} fill={entry.color} />
-													))}
-												</Pie>
+											<BarChart data={comparisonData}>
+												<CartesianGrid stroke="var(--border)" strokeDasharray="0" vertical={false} />
+												<XAxis dataKey="name" stroke="var(--muted-foreground)" />
+												<YAxis
+													stroke="var(--muted-foreground)"
+													tickFormatter={(value) => `${Math.round((value as number) / 1_000_000)}M`}
+												/>
 												<RechartsTooltip
+													cursor={{ fill: 'var(--muted)' }}
 													formatter={(value: number, name: string) => [
 														currencyFormatter.format(value as number),
 														name,
 													]}
 												/>
-											</PieChart>
-										</ResponsiveContainer>
-									</div>
-								)}
-							</TabsContent>
-							<TabsContent value="donations" className="pt-4">
-								{donationsWithShare.length === 0 ? (
-									<p className="text-sm text-muted-foreground">
-										Voeg eerst donaties toe om deze grafiek te zien.
-									</p>
-								) : (
-									<div className="h-72 w-full">
-										<ResponsiveContainer>
-											<PieChart>
-												<Pie data={donationPieData} dataKey="value" innerRadius={50} outerRadius={110}>
-													{donationPieData.map((entry, index) => (
-														<Cell key={entry.name} fill={entry.color} />
+												<Bar dataKey="contribution">
+													{comparisonData.map((entry, index) => (
+														<Cell
+															key={`${entry.name}-${index}`}
+															fill={entry.color || BAR_COLORS[index % BAR_COLORS.length]}
+														/>
 													))}
-												</Pie>
-												<RechartsTooltip
-													formatter={(value: number, name: string, entry) => [
-														`${currencyFormatter.format(value as number)} (${percentFormatter.format((entry?.payload?.percentage || 0) / 100)})`,
-														name,
-													]}
-												/>
-											</PieChart>
+												</Bar>
+											</BarChart>
 										</ResponsiveContainer>
 									</div>
-								)}
-							</TabsContent>
-						</Tabs>
-					</CardContent>
-				</Card>
+								</>
+							)}
+						</div>
+					</div>
+				</section>
 
-				<Card>
-					<CardHeader>
-						<CardTitle>Vergelijking met miljardairs</CardTitle>
-						<CardDescription>
-							Zie hoeveel de rijkste ondernemers zouden doneren als ze jouw percentage toepassen (en jouw inleg staat erbij).
-						</CardDescription>
-					</CardHeader>
-					<CardContent className="h-[360px]">
-						{comparisonData.length === 0 ? (
-							<div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-								Vul je inkomen en donaties in om de vergelijkingen te zien.
-							</div>
-						) : (
-							<ResponsiveContainer>
-								<BarChart data={comparisonData}>
-									<CartesianGrid stroke="var(--border)" strokeDasharray="4 8" vertical={false} />
-									<XAxis dataKey="name" stroke="var(--muted-foreground)" />
-									<YAxis
-										stroke="var(--muted-foreground)"
-										tickFormatter={(value) => `${Math.round((value as number) / 1_000_000)}M`}
-									/>
-									<RechartsTooltip
-										cursor={{ fill: 'var(--muted)' }}
-										formatter={(value: number, name: string, entry) => [
-											currencyFormatter.format(value as number),
-											entry?.payload?.source || name,
-										]}
-									/>
-									<Bar dataKey="contribution" radius={[8, 8, 0, 0]}>
-										{comparisonData.map((entry, index) => (
-											<Cell key={`${entry.name}-${index}`} fill={entry.color || BAR_COLORS[index % BAR_COLORS.length]} />
-										))}
-									</Bar>
-								</BarChart>
-							</ResponsiveContainer>
-						)}
-					</CardContent>
-				</Card>
-
-				<Card className="border-dashed">
-					<CardHeader>
-						<CardTitle>Hoe we jaarbedragen berekenen</CardTitle>
-						<CardDescription>Zo vergelijken we alle bedragen eerlijk.</CardDescription>
-					</CardHeader>
-					<CardContent className="space-y-3 text-sm text-muted-foreground">
-						<ul className="list-disc space-y-2 pl-5">
-							<li>Maandelijks bedrag × 12</li>
-							<li>Kwartaalbedrag × 4</li>
-							<li>Jaarlijks bedrag blijft gelijk</li>
-						</ul>
-						<p>
-							De percentages en vergelijkingen zijn bedoeld om te inspireren. Werkelijk vermogen en inkomsten van miljardairs variëren per bron en periode.
+				<section className="border border-foreground/60 bg-card">
+					<div className="border-b border-foreground/60 bg-secondary px-6 py-6">
+						<Badge variant="outline" className="tracking-[0.3em] uppercase text-muted-foreground">
+							Share
+						</Badge>
+						<h2 className="mt-2 text-3xl font-black uppercase tracking-tight text-foreground">Save & share</h2>
+						<p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+							Create a unique link for yourself or pass the percentage on to someone else.
 						</p>
-					</CardContent>
-				</Card>
+					</div>
+					<div className="flex flex-col gap-6 px-6 py-6 lg:flex-row lg:items-center lg:justify-between">
+						<div className="flex flex-col gap-4">
+							<Button
+								type="button"
+								variant="outline"
+								className="w-fit tracking-[0.25em] uppercase"
+								onClick={handleShare}
+							>
+								Copy shareable link
+							</Button>
+							{shareLink ? (
+								<div className="flex flex-col gap-2">
+									<Label htmlFor="share-link">Your link</Label>
+									<Input
+										id="share-link"
+										readOnly
+										value={shareLink}
+										onFocus={(event) => event.currentTarget.select()}
+									/>
+								</div>
+							) : null}
+						</div>
+						<div className="max-w-sm space-y-2 text-xs text-muted-foreground">
+							<a
+								href={twitterShareUrl}
+								target="_blank"
+								rel="noreferrer"
+								className="inline-flex items-center gap-2 text-primary hover:underline"
+							>
+								<span className="tracking-[0.28em] uppercase">Share on X</span>
+							</a>
+							<p>We keep your data locally via a single cookie so you can pick up later.</p>
+						</div>
+					</div>
+				</section>
 			</div>
 
-			<SheetContent side="right">
-				<SheetHeader>
-					<SheetTitle>Goed doel toevoegen</SheetTitle>
-					<SheetDescription>
-						Vul het bedrag en de frequentie in. We rekenen het jaarbedrag voor je uit.
+			<SheetContent side="right" className="w-full border-l border-foreground/60 bg-card sm:max-w-xl">
+				<SheetHeader className="border-b border-foreground/60 px-6 pb-4 pt-6">
+					<SheetTitle className="text-2xl font-black uppercase tracking-[0.28em]">{sheetTitle}</SheetTitle>
+					<SheetDescription className="text-sm leading-relaxed text-muted-foreground">
+						Add the amount and cadence — we’ll calculate the yearly impact.
 					</SheetDescription>
 				</SheetHeader>
-				<form className="flex flex-1 flex-col gap-4 p-4" onSubmit={handleDonationSubmit}>
-					<div className="grid gap-2">
-						<Label htmlFor="charityName">Naam van het goede doel</Label>
+				<form className="flex flex-1 flex-col gap-5 px-6 py-6" onSubmit={handleDonationSubmit}>
+					<div className="grid gap-3">
+						<Label htmlFor="charityName">Charity name</Label>
 						<Input
 							id="charityName"
 							value={formState.charity}
 							onChange={(event) => setFormState((prev) => ({ ...prev, charity: event.target.value }))}
-							placeholder="Bijv. Artsen zonder Grenzen"
+							placeholder="e.g. Doctors Without Borders"
 							autoFocus
 							required
 						/>
 					</div>
-					<div className="grid gap-2">
-						<Label htmlFor="charityAmount">Bedrag (EUR)</Label>
+					<div className="grid gap-3">
+						<Label htmlFor="charityAmount">Amount (EUR)</Label>
 						<Input
 							id="charityAmount"
 							inputMode="numeric"
@@ -638,32 +821,37 @@ export default function DonationApp() {
 							onChange={(event) =>
 								setFormState((prev) => ({ ...prev, amount: formatNumericInput(event.target.value) }))
 							}
-							placeholder="Bijv. 50"
+							placeholder="e.g. 50"
 							required
 						/>
 					</div>
-					<div className="grid gap-2">
-						<Label>Frequentie</Label>
+					<div className="grid gap-3">
+						<Label>Frequency</Label>
 						<Select
 							value={formState.frequency}
 							onValueChange={(value) => setFormState((prev) => ({ ...prev, frequency: value as DonationFrequency }))}
 						>
 							<SelectTrigger>
-								<SelectValue placeholder="Kies een frequentie" />
+								<SelectValue placeholder="Pick a frequency" />
 							</SelectTrigger>
 							<SelectContent>
-								<SelectItem value="monthly">Maandelijks</SelectItem>
-								<SelectItem value="quarterly">Per kwartaal</SelectItem>
-								<SelectItem value="yearly">Jaarlijks</SelectItem>
+								<SelectItem value="monthly">Monthly</SelectItem>
+								<SelectItem value="quarterly">Quarterly</SelectItem>
+								<SelectItem value="yearly">Yearly</SelectItem>
 							</SelectContent>
 						</Select>
 					</div>
-					<div className="mt-auto flex gap-2">
-						<Button type="submit" className="flex-1">
-							Opslaan
+					<div className="mt-auto flex gap-3">
+						<Button type="submit" className="flex-1 tracking-[0.25em] uppercase">
+							{submitLabel}
 						</Button>
-						<Button type="button" variant="outline" className="flex-1" onClick={() => setIsSheetOpen(false)}>
-							Annuleren
+						<Button
+							type="button"
+							variant="outline"
+							className="flex-1 tracking-[0.25em] uppercase"
+							onClick={() => setIsSheetOpen(false)}
+						>
+							Cancel
 						</Button>
 					</div>
 				</form>

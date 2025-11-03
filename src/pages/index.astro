@@ -7,13 +7,19 @@ import ModeToggle from '../components/mode-toggle';
 <Layout>
 	<main class="mx-auto flex min-h-screen w-full flex-col gap-10 px-6 pb-20 pt-12 lg:px-10 xl:px-16">
 		<header class="flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
-			<div class="space-y-3">
-				<h1 class="text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
-					Benefactory — geef met inzicht
+			<div class="space-y-4">
+				<div class="inline-flex items-center gap-3 rounded-none border border-foreground px-4 py-1 text-xs uppercase tracking-[0.3em] text-foreground">
+					A small tool about big differences
+				</div>
+				<h1 class="text-4xl font-semibold uppercase tracking-tight text-foreground md:text-5xl">
+					Mind the Gap
 				</h1>
 				<p class="max-w-2xl text-sm text-muted-foreground md:text-base">
-					Voer je jaarinkomen in, voeg je donaties toe en zie meteen hoe jouw geefpercentage zich verhoudt tot de top 1%.
+					You give. You care. But what if everyone matched your share? Plug in your numbers and see how the scale shifts.
 				</p>
+				<a href="#donations" class="inline-flex w-fit items-center justify-center rounded-full border border-foreground/40 px-5 py-2 text-sm font-semibold uppercase tracking-wide text-foreground transition hover:bg-foreground hover:text-background">
+					See what your share means
+				</a>
 			</div>
 			<ModeToggle client:only="react" />
 		</header>

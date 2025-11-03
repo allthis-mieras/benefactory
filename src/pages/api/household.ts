@@ -1,6 +1,8 @@
 import type { APIRoute } from 'astro';
 import { getSupabaseClient } from '../../lib/supabaseClient';
 
+export const prerender = false;
+
 const supabase = getSupabaseClient();
 
 async function fetchHousehold(id: string) {
@@ -54,7 +56,12 @@ export const GET: APIRoute = async ({ request }) => {
 
 export const POST: APIRoute = async ({ request }) => {
 	try {
-		const body = await request.json();
+		let body: Record<string, unknown> = {};
+		try {
+			body = await request.json();
+		} catch {
+			body = {};
+		}
 		const alias: string | null = body.alias ?? null;
 		const annualIncome = Number(body.annualIncome ?? 0);
 
@@ -74,6 +81,7 @@ export const POST: APIRoute = async ({ request }) => {
 			headers: { 'content-type': 'application/json' },
 		});
 	} catch (error) {
+		console.error('POST /api/household error', error);
 		const message = error instanceof Error ? error.message : 'Unknown error';
 		return new Response(JSON.stringify({ error: message }), {
 			status: 500,
@@ -84,7 +92,12 @@ export const POST: APIRoute = async ({ request }) => {
 
 export const PUT: APIRoute = async ({ request }) => {
 	try {
-		const body = await request.json();
+		let body: Record<string, unknown> = {};
+		try {
+			body = await request.json();
+		} catch {
+			body = {};
+		}
 		const id = String(body.id ?? '');
 		const annualIncome = Number(body.annualIncome ?? NaN);
 
@@ -109,6 +122,7 @@ export const PUT: APIRoute = async ({ request }) => {
 			headers: { 'content-type': 'application/json' },
 		});
 	} catch (error) {
+		console.error('PUT /api/household error', error);
 		const message = error instanceof Error ? error.message : 'Unknown error';
 		return new Response(JSON.stringify({ error: message }), {
 			status: 500,

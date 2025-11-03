@@ -18,11 +18,19 @@ Start vervolgens de ontwikkelserver:
 npm run dev
 ```
 
+Maak voor het eerst een `.env` aan op basis van `.env.example` en vul je Supabase `PUBLIC_SUPABASE_URL` en `PUBLIC_SUPABASE_ANON_KEY` in. Zonder deze waarden kan de dataset niet opgeslagen worden.
+
 Bezoek [http://localhost:4321](http://localhost:4321) en je dashboard staat klaar.
 
 ## Data-opslag & delen
 
-Alle gegevens worden lokaal opgeslagen in `localStorage` onder de sleutel `benefactory.dashboard`. Via de knop “Deelbare link kopiëren” wordt een URL gegenereerd met de actuele gegevens (gecodeerd in de querystring). Deel deze link met jezelf of anderen; wie de link opent, krijgt jouw configuratie te zien en kan die lokaal verder aanpassen.
+Gegevens worden tijdelijk en anoniem bewaard in Supabase. We gebruiken:
+
+- een willekeurige household-ID (cookie) om je sessie later op dezelfde browser te hervatten;
+- Supabase tabellen `households` en `donations` voor inkomen en giften;
+- een deelbare link (`?d=<id>`) die verwijst naar je Supabase record. Wie de link opent, krijgt dezelfde gegevens en kan ze aanpassen.
+
+Na verloop van tijd worden de records automatisch opgeschoond; er worden geen IP-adressen of andere persoonsgegevens opgeslagen.
 
 ## Belangrijkste bestanden
 
