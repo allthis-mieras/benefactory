@@ -1,0 +1,25 @@
+---
+import Layout from '../layouts/Layout.astro';
+import DonationApp from '../components/DonationApp';
+import ModeToggle from '../components/mode-toggle';
+---
+
+<Layout>
+	<main class="mx-auto flex min-h-screen w-full flex-col gap-10 px-6 pb-20 pt-12 lg:px-10 xl:px-16">
+		<header class="flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
+			<div class="space-y-3">
+				<h1 class="text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
+					Benefactory — geef met inzicht
+				</h1>
+				<p class="max-w-2xl text-sm text-muted-foreground md:text-base">
+					Voer je jaarinkomen in, voeg je donaties toe en zie meteen hoe jouw geefpercentage zich verhoudt tot de top 1%.
+				</p>
+			</div>
+			<ModeToggle client:only="react" />
+		</header>
+
+		<section id="donations" class="flex flex-col gap-6">
+			<DonationApp client:load />
+		</section>
+	</main>
+</Layout>
