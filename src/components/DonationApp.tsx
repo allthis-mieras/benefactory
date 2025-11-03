@@ -77,7 +77,7 @@ const currencyFormatter = new Intl.NumberFormat('nl-NL', {
 	currency: 'EUR',
 	maximumFractionDigits: 0,
 });
-const percentFormatter = new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 1 });
+const percentFormatter = new Intl.NumberFormat('nl-NL', { style: 'percent', maximumFractionDigits: 1 });
 
 const BILLIONAIRES = [
   {
@@ -712,7 +712,7 @@ export default function DonationApp() {
 											</TableBody>
 										</Table>
 									</div>
-									<div className="h-[320px] w-full">
+									<div className="h-80 w-full">
 										<ResponsiveContainer>
 											<BarChart data={comparisonData}>
 												<CartesianGrid stroke="var(--border)" strokeDasharray="0" vertical={false} />
