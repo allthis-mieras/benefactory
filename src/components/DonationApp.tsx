@@ -77,7 +77,7 @@ const currencyFormatter = new Intl.NumberFormat('nl-NL', {
 	currency: 'EUR',
 	maximumFractionDigits: 0,
 });
-const percentFormatter = new Intl.NumberFormat('nl-NL', { style: 'percent', maximumFractionDigits: 1 });
+const percentFormatter = new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 1 });
 
 const BILLIONAIRES = [
   {
